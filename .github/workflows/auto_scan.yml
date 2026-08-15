@@ -1,16 +1,6 @@
 name: Daily Darvas Scanner
 
 on:
-  push:
-  schedule:
-    - cron: '0 15 * * 1-5'
-  workflow_dispatch:  # આ લાઈન છે એટલે જ 'Run workflow' બટન આવશે
-
-jobs:
-# ... બાકીનો કોડ જેમ છે તેમ જ રહેવા દેવો
-name: Daily Darvas Scanner
-
-on:
   schedule:
     - cron: '0 15 * * 1-5'
   workflow_dispatch:
