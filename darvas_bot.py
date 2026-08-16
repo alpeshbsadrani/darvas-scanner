@@ -22,7 +22,7 @@ def send_telegram_message(message):
 
 def get_stocks_from_sheet():
     try:
-        df = pd.read_csv(SHEET_URL)
+        df = pd.read_csv(SHEET_URL + '&t=' + str(datetime.now().timestamp()))
         stocks = df.iloc[:, 0].dropna().tolist()
         return [str(s).strip() for s in stocks if str(s).strip() != '']
     except Exception as e:
