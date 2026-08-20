@@ -206,6 +206,8 @@ def monitor_live_breakouts():
 # ૪. મુખ્ય લાઈવ લૂપ (Main Loop)
 # ============================================================
 if __name__ == "__main__":
+    test_current_breakouts_now()
+    
     send_telegram_message("🤖 *બોટ સક્રિય થયો છે!*\nલાઈવ બ્રેકઆઉટ અને સાંજનો રિપોર્ટ બંને ચાલુ છે.")
     
     eod_report_sent = False
