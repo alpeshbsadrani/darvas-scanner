@@ -10,7 +10,6 @@ warnings.filterwarnings('ignore')
 # --- તમારી વિગતો ---
 TELEGRAM_BOT_TOKEN = '8896031421:AAFIeqDTKsH64aAnaCuiuW8F9aZxMTIEA9g'
 TELEGRAM_CHAT_ID = '1051774043'
-
 SHEET_URL = 'https://docs.google.com/spreadsheets/d/1eKumGC4e2MV1jPjoG3LvOtvJ24SKUz2Y5YPkO5WUPlQ/export?format=csv'
 
 def send_telegram_message(message):
@@ -25,30 +24,32 @@ def get_stocks_from_sheet():
     try:
         df = pd.read_csv(SHEET_URL + '&t=' + str(datetime.now().timestamp()))
         stocks = df.iloc[:, 0].dropna().tolist()
-        clean_stocks = []
+        clean_symbols = []
         for s in stocks:
-            sym = str(s).strip()
-            if sym != '':
+            sym = str(s).strip().upper()
+            if sym != '' and sym != 'NAN':
+                # જો પાછળ .NS કે .BO ન હોય તો ફરજિયાત .NS જોડો
                 if not sym.endswith('.NS') and not sym.endswith('.BO'):
-                    sym += '.NS'
-                clean_stocks.append(sym)
-        return clean_stocks
+                    sym = sym + '.NS'
+                clean_symbols.append(sym)
+        return clean_symbols
     except Exception as e:
-        print(f"ગૂગલ શીટ વાંચવામાં એરર: {e}")
+        print(f"Sheet Error: {e}")
         return []
 
-def calculate_car_status(series_close):
+def calculate_car_status(df_stock):
     """CAR Status Calculation"""
-    if len(series_close) < 200:
+    if len(df_stock) < 200:
         return "SHORT HISTORY"
     
-    sma50 = series_close.rolling(50).mean().dropna()
-    sma200 = series_close.rolling(200).mean().dropna()
+    close_series = df_stock['Close']
+    sma50 = close_series.rolling(50).mean().dropna()
+    sma200 = close_series.rolling(200).mean().dropna()
 
     if len(sma50) == 0 or len(sma200) < 21:
         return "SHORT HISTORY"
 
-    cmp = float(series_close.iloc[-1])
+    cmp = float(close_series.iloc[-1])
     val_sma50 = float(sma50.iloc[-1])
     val_sma200 = float(sma200.iloc[-1])
     prev_sma200 = float(sma200.iloc[-21])
@@ -66,27 +67,19 @@ def analyze_stocks():
         print("શીટમાંથી કોઈ સ્ટોક મળ્યા નથી.")
         return
 
-    # બધા સ્ટોક્સનો ડેટા એકસાથે ડાઉનલોડ (Zero Rate-limit issue)
-    print(f"કુલ {len(tickers)} સ્ટોક્સનો ડેટા ડાઉનલોડ થઈ રહ્યો છે...")
-    try:
-        data = yf.download(tickers, period="3y", interval="1d", group_by='ticker', progress=False, threads=True)
-    except Exception as e:
-        print(f"Download Error: {e}")
-        return
-
+    print(f"કુલ {len(tickers)} સ્ટોક્સ સ્કેન થઈ રહ્યા છે...")
     results = []
 
+    # દરેક સ્ટોક માટે ક્લીન ડેટા ફેચિંગ
     for ticker in tickers:
         try:
-            # સિમ્બોલ મુજબ ડેટા મેળવવો
-            if len(tickers) == 1:
-                df = data.copy()
-            else:
-                if ticker not in data.columns.levels[0]:
-                    continue
-                df = data[ticker].copy()
+            t = yf.Ticker(ticker)
+            df = t.history(period="3y", interval="1d")
 
-            # સંપૂર્ણપણે ખાલી રો હટાવો
+            if df.empty or len(df) < 20:
+                continue
+
+            # NaN વેલ્યુ સંપૂર્ણ હટાવો
             df = df.dropna(subset=['Close', 'High', 'Low'])
 
             if len(df) < 20:
@@ -117,14 +110,14 @@ def analyze_stocks():
 
             low_20d = float(df['Low'].iloc[-20:].min())
             low_52w = float(df['Low'].iloc[-252:].min()) if len(df) >= 252 else float(df['Low'].min())
-            
+
             dist_1m = round(((high_1m - cmp) / cmp) * 100, 2)
             dist_3m = round(((high_3m - cmp) / cmp) * 100, 2)
             dist_6m = round(((high_6m - cmp) / cmp) * 100, 2)
             dist_1y = round(((high_1y - cmp) / cmp) * 100, 2)
             dist_3y = round(((high_3y - cmp) / cmp) * 100, 2)
 
-            # કયા હાઈ તૂટ્યા
+            # કયા કયા હાઈ તૂટ્યા
             highs_broken = []
             if today_high >= high_1m_prev:
                 highs_broken.append("1M")
@@ -136,10 +129,10 @@ def analyze_stocks():
                 highs_broken.append("1YR")
             if today_high >= high_3y_prev:
                 highs_broken.append("3YR")
-                
+
             broken_20d_low = today_low <= low_20d
-            car_status = calculate_car_status(df['Close'])
-            
+            car_status = calculate_car_status(df)
+
             results.append({
                 'Stock': ticker.replace('.NS', '').replace('.BO', ''),
                 'CMP': cmp,
@@ -155,30 +148,33 @@ def analyze_stocks():
             })
         except Exception:
             continue
-            
+
     df_res = pd.DataFrame(results)
     if df_res.empty:
         send_telegram_message("આજે કોઈ ડેટા મળ્યો નથી.")
         return
 
+    # NaN ફિલ્ટર
+    df_res = df_res.dropna(subset=['CMP', 'Dist_1M'])
+
     used_stocks = set()
     final_msg = "📊 **માર્કેટનામા - ડાર્વાસ બોક્સ સ્કેનર** 📊\n\n"
-    
-    # ૧. નવો હાઈ લગાવનાર સ્ટોક્સ (ટેબલ ફોર્મેટ)
+
+    # ૧. નવો હાઈ લગાવનાર સ્ટોક્સ (તમારું ટેબલ ફોર્મેટ + CAR)
     df_highs = df_res[df_res['Highs_Broken'] != '']
     if not df_highs.empty:
         final_msg += "🚀 **આજે નવો હાઈ લગાવનાર સ્ટોક્સ:**\n"
         for _, row in df_highs.iterrows():
             final_msg += f"▪️ `{row['Stock']}` ₹{row['CMP']} | {row['Highs_Broken']} | CAR: *{row['CAR_Status']}*\n"
         final_msg += "\n"
-    
+
     # ૨. NEAR HIGHS સેક્શન્સ
     df_3y = df_res.sort_values('Dist_3Y').head(3)
     final_msg += "🎯 **NEAR 3-YEAR HIGH (Top 3)**\n"
     for _, row in df_3y.iterrows():
         final_msg += f"▪️ {row['Stock']}: CMP ₹{row['CMP']} | 3Y High: ₹{row['High_3Y']} ({row['Dist_3Y']}% દૂર) | CAR: *{row['CAR_Status']}*\n"
         used_stocks.add(row['Stock'])
-        
+
     df_1y = df_res[~df_res['Stock'].isin(used_stocks)].sort_values('Dist_1Y').head(3)
     final_msg += "\n🎯 **NEAR 1-YEAR HIGH (Top 3)**\n"
     for _, row in df_1y.iterrows():
