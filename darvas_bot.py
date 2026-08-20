@@ -2,6 +2,7 @@ import pandas as pd
 import yfinance as yf
 import requests
 import warnings
+import math
 from datetime import datetime
 
 warnings.filterwarnings('ignore')
@@ -24,7 +25,14 @@ def get_stocks_from_sheet():
     try:
         df = pd.read_csv(SHEET_URL + '&t=' + str(datetime.now().timestamp()))
         stocks = df.iloc[:, 0].dropna().tolist()
-        return [str(s).strip() for s in stocks if str(s).strip() != '']
+        clean_stocks = []
+        for s in stocks:
+            sym = str(s).strip()
+            if sym != '':
+                if not sym.endswith('.NS') and not sym.endswith('.BO'):
+                    sym += '.NS'
+                clean_stocks.append(sym)
+        return clean_stocks
     except Exception as e:
         print(f"ગૂગલ શીટ વાંચવામાં એરર: {e}")
         return []
@@ -32,61 +40,73 @@ def get_stocks_from_sheet():
 def calculate_car_status(df):
     """
     Cumulative Average Reversal (CAR) સ્ટેટસ ગણતરી:
-    - 200 SMA ઉપલબ્ધ ન હોય તો -> SHORT HISTORY
+    - 200 SMA ઉપલબ્ધ ન હોય -> SHORT HISTORY
     - CMP > 50 SMA અને CMP > 200 SMA અને 200 SMA વધતી હોય -> BUY / AVERAGE
     - બાકી -> AVOID
     """
     if len(df) < 200:
         return "SHORT HISTORY"
     
-    df_calc = df.copy()
-    df_calc['SMA50'] = df_calc['Close'].rolling(50).mean()
-    df_calc['SMA200'] = df_calc['Close'].rolling(200).mean()
+    sma50 = df['Close'].rolling(50).mean().dropna()
+    sma200 = df['Close'].rolling(200).mean().dropna()
 
-    cmp = float(df_calc['Close'].iloc[-1])
-    sma50 = float(df_calc['SMA50'].iloc[-1])
-    sma200 = float(df_calc['SMA200'].iloc[-1])
-    prev_sma200 = float(df_calc['SMA200'].iloc[-20])
+    if len(sma50) == 0 or len(sma200) < 21:
+        return "SHORT HISTORY"
 
-    if cmp > sma50 and cmp > sma200 and sma200 >= prev_sma200:
+    cmp = float(df['Close'].iloc[-1])
+    val_sma50 = float(sma50.iloc[-1])
+    val_sma200 = float(sma200.iloc[-1])
+    prev_sma200 = float(sma200.iloc[-21])
+
+    if cmp > val_sma50 and cmp > val_sma200 and val_sma200 >= prev_sma200:
         return "BUY / AVERAGE"
     else:
         return "AVOID"
 
 def analyze_stocks():
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] સ્કેનિંગ શરૂ થઈ રહ્યું છે. કૃપા કરીને રાહ જુઓ...")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] સ્કેનિંગ શરૂ થઈ રહ્યું છે...")
     
     tickers = get_stocks_from_sheet()
     if not tickers:
         print("શીટમાંથી કોઈ સ્ટોક મળ્યા નથી.")
         return
 
-    print(f"કુલ {len(tickers)} સ્ટોક્સનું એક-પછી-એક સ્કેનિંગ ચાલુ છે...")
-    
+    print(f"કુલ {len(tickers)} સ્ટોક્સનું સ્કેનિંગ ચાલુ છે...")
     results = []
     
     for ticker in tickers:
         try:
-            df = yf.download(ticker, period="3y", interval="1d", progress=False)
+            # Ticker.history() એ MultiIndex અને NaN એરર વગર ચોક્કસ ડેટા આપે છે
+            t = yf.Ticker(ticker)
+            df = t.history(period="3y")
                 
-            if df.empty or len(df) < 20:
+            if df.empty:
                 continue
-                
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.droplevel(1)
-                
-            cmp = round(float(df['Close'].iloc[-1]), 2)
+
+            # NaN રો દૂર કરવી
+            df = df.dropna(subset=['Close', 'High', 'Low'])
+
+            if len(df) < 20:
+                continue
+
+            cmp = float(df['Close'].iloc[-1])
             today_high = float(df['High'].iloc[-1])
             today_low = float(df['Low'].iloc[-1])
-            
-            # વિવિધ ટાઈમફ્રેમ્સના પાછલા હાઈ (આજના દિવસ સિવાય)
+
+            # જો ભાવ NaN કે 0 હોય તો છોડી દેવું
+            if math.isnan(cmp) or cmp <= 0:
+                continue
+
+            cmp = round(cmp, 2)
+
+            # પાછલા દિવસોના હાઈ (આજના દિવસ સિવાય)
             high_1m_prev = float(df['High'].iloc[-21:-1].max()) if len(df) >= 21 else float(df['High'].iloc[:-1].max())
             high_3m_prev = float(df['High'].iloc[-63:-1].max()) if len(df) >= 63 else float(df['High'].iloc[:-1].max())
             high_6m_prev = float(df['High'].iloc[-126:-1].max()) if len(df) >= 126 else float(df['High'].iloc[:-1].max())
             high_1y_prev = float(df['High'].iloc[-252:-1].max()) if len(df) >= 252 else float(df['High'].iloc[:-1].max())
             high_3y_prev = float(df['High'].iloc[:-1].max())
-            
-            # આજના દિવસ સહિતના હાઈ (Near Highs ગણતરી માટે)
+
+            # આજના દિવસ સહિતના હાઈ
             high_1m = float(df['High'].iloc[-21:].max()) if len(df) >= 21 else float(df['High'].max())
             high_3m = float(df['High'].iloc[-63:].max()) if len(df) >= 63 else float(df['High'].max())
             high_6m = float(df['High'].iloc[-126:].max()) if len(df) >= 126 else float(df['High'].max())
@@ -102,7 +122,7 @@ def analyze_stocks():
             dist_1y = round(((high_1y - cmp) / cmp) * 100, 2)
             dist_3y = round(((high_3y - cmp) / cmp) * 100, 2)
             
-            # કયા કયા હાઈ તૂટ્યા તે ચેક કરવું
+            # કયા કયા હાઈ તૂટ્યા
             highs_broken = []
             if today_high >= high_1m_prev:
                 highs_broken.append("1M")
@@ -137,8 +157,11 @@ def analyze_stocks():
             
     df_res = pd.DataFrame(results)
     if df_res.empty:
-        send_telegram_message("આજે કોઈ ડેટા મળ્યો નથી (બધા સ્ટોક્સનું સ્કેનિંગ નિષ્ફળ).")
+        send_telegram_message("આજે કોઈ ડેટા મળ્યો નથી.")
         return
+
+    # NaN વગરનો ક્લીન ડેટા
+    df_res = df_res.dropna(subset=['CMP', 'Dist_1M'])
 
     used_stocks = set()
     final_msg = "📊 **માર્કેટનામા - ડાર્વાસ બોક્સ સ્કેનર** 📊\n\n"
