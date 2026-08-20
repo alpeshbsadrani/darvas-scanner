@@ -2,25 +2,30 @@ import pandas as pd
 import yfinance as yf
 import requests
 import warnings
+import time
 from datetime import datetime
 
 warnings.filterwarnings('ignore')
 
-# --- તમારી વિગતો ---
+# ============================================================
+# ૧. ક્રેડેન્શિયલ્સ & Google Sheets URL
+# ============================================================
 TELEGRAM_BOT_TOKEN = '8896031421:AAFIeqDTKsH64aAnaCuiuW8F9aZxMTIEA9g'
 TELEGRAM_CHAT_ID = '1051774043'
 
 SHEET_URL = 'https://docs.google.com/spreadsheets/d/1eKumGC4e2MV1jPjoG3LvOtvJ24SKUz2Y5YPkO5WUPlQ/export?format=csv'
 
 def send_telegram_message(message):
+    """ટેલિગ્રામ મેસેજ મોકલવા માટેનું ફંક્શન"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
     try:
-        requests.post(url, data=payload)
+        requests.post(url, data=payload, timeout=10)
     except Exception as e:
         print(f"Telegram error: {e}")
 
 def get_stocks_from_sheet():
+    """ગૂગલ શીટમાંથી સ્ટોક્સની લિસ્ટ લાવે છે"""
     try:
         df = pd.read_csv(SHEET_URL + '&t=' + str(datetime.now().timestamp()))
         stocks = df.iloc[:, 0].dropna().tolist()
@@ -29,27 +34,26 @@ def get_stocks_from_sheet():
         print(f"ગૂગલ શીટ વાંચવામાં એરર: {e}")
         return []
 
-def analyze_stocks():
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] સ્કેનિંગ શરૂ થઈ રહ્યું છે. કૃપા કરીને રાહ જુઓ...")
+# ============================================================
+# ૨. સાંજનો માર્કેટનામા - ડાર્વાસ બોક્સ રિપોર્ટ (તમારો ઓરિજિનલ કોડ)
+# ============================================================
+def analyze_stocks_eod():
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] સાંજનો Darvas Box રિપોર્ટ તૈયાર થઈ રહ્યો છે...")
     
     tickers = get_stocks_from_sheet()
     if not tickers:
         print("શીટમાંથી કોઈ સ્ટોક મળ્યા નથી.")
         return
 
-    print(f"કુલ {len(tickers)} સ્ટોક્સનું એક-પછી-એક સ્કેનિંગ ચાલુ છે...")
-    
     results = []
     
     for ticker in tickers:
         try:
-            # એક-એક સ્ટોકનો ડેટા ડાઉનલોડ (સૌથી સુરક્ષિત રીત)
             df = yf.download(ticker, period="3y", interval="1d", progress=False)
                 
             if df.empty or len(df) < 20:
                 continue
                 
-            # yfinance ના નવા વર્ઝનમાં આવતી એરરને રોકવા
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.droplevel(1)
                 
@@ -88,8 +92,7 @@ def analyze_stocks():
                 'Low_20d': round(low_20d, 2),
                 'Low_52w': round(low_52w, 2)
             })
-        except Exception as e:
-            # કોઈ એક સ્ટોકમાં ભૂલ આવે તો તેને છોડીને સિસ્ટમ આગળ વધશે
+        except Exception:
             continue
             
     df_res = pd.DataFrame(results)
@@ -140,7 +143,102 @@ def analyze_stocks():
             final_msg += f"▪️ {row['Stock']}: CMP ₹{row['CMP']} | 52W Low: ₹{row['Low_52w']}\n"
 
     send_telegram_message(final_msg)
-    print("સ્કેનિંગ પૂર્ણ. ટેલિગ્રામ પર રિપોર્ટ મોકલી દેવામાં આવ્યો છે.")
+    print("સાંજનો રિપોર્ટ સફળતાપૂર્વક મોકલાઈ ગયો.")
 
+# ============================================================
+# ૩. લાઈવ VCP / Pivot Breakout સ્કેનર
+# ============================================================
+triggered_today = set()
+
+def monitor_live_breakouts():
+    """ગૂગલ શીટના સ્ટોક્સમાં લાઈવ બ્રેકઆઉટ ચકાસે છે"""
+    tickers = get_stocks_from_sheet()
+    if not tickers:
+        return
+
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] લાઈવ બ્રેકઆઉટ સ્કેનિંગ ચાલુ છે ({len(tickers)} સ્ટોક્સ)...")
+
+    for ticker in tickers:
+        if ticker in triggered_today:
+            continue
+
+        try:
+            df_intraday = yf.download(ticker, period="5d", interval="5m", progress=False)
+            df_daily = yf.download(ticker, period="60d", interval="1d", progress=False)
+
+            if df_intraday.empty or df_daily.empty or len(df_daily) < 21:
+                continue
+
+            if isinstance(df_intraday.columns, pd.MultiIndex):
+                df_intraday.columns = df_intraday.columns.droplevel(1)
+            if isinstance(df_daily.columns, pd.MultiIndex):
+                df_daily.columns = df_daily.columns.droplevel(1)
+
+            # પાછલા ૨૦ દિવસનો હાઈ (Pivot High)
+            pivot_price = float(df_daily['High'].iloc[-21:-1].max())
+            
+            latest_price = float(df_intraday['Close'].iloc[-1])
+            current_vol = float(df_intraday['Volume'].iloc[-1])
+            avg_vol = float(df_intraday['Volume'].tail(30).mean())
+
+            # બ્રેકઆઉટ શરતો: Pivot High તોડ્યો + 1.5x વોલ્યુમ સર્જ
+            if latest_price > pivot_price and current_vol > (avg_vol * 1.5):
+                stock_name = ticker.replace('.NS', '').replace('.BO', '')
+                vol_surge = round(current_vol / avg_vol, 1) if avg_vol > 0 else 1.0
+                
+                msg = (
+                    f"🚀 *LIVE PIVOT BREAKOUT ALERT!* 🚀\n\n"
+                    f"📌 *Stock:* `{stock_name}`\n"
+                    f"💰 *CMP:* ₹{latest_price:.2f}\n"
+                    f"🎯 *Pivot (20D High):* ₹{pivot_price:.2f}\n"
+                    f"📊 *Volume Surge:* {vol_surge}x (5-Min Avg)\n"
+                    f"⏰ *Time:* {datetime.now().strftime('%H:%M:%S')}\n"
+                    f"💡 *Action:* VCP / Darvas Box માંથી બ્રેકઆઉટ!"
+                )
+                send_telegram_message(msg)
+                triggered_today.add(ticker)
+                print(f"બ્રેકઆઉટ એલર્ટ મોકલાયો: {stock_name}")
+                
+        except Exception:
+            continue
+
+# ============================================================
+# ૪. મુખ્ય લાઈવ લૂપ (Main Loop)
+# ============================================================
 if __name__ == "__main__":
-    analyze_stocks()
+    send_telegram_message("🤖 *બોટ સક્રિય થયો છે!*\nલાઈવ બ્રેકઆઉટ અને સાંજનો રિપોર્ટ બંને ચાલુ છે.")
+    
+    eod_report_sent = False
+
+    while True:
+        now = datetime.now()
+        market_open = now.replace(hour=9, minute=15, second=0)
+        market_close = now.replace(hour=15, minute=30, second=0)
+        eod_time = now.replace(hour=15, minute=35, second=0)
+
+        # ૧. સપ્તાહાંત (શનિ-રવિ)
+        if now.weekday() >= 5:
+            print("વીકેન્ડ (શનિ/રવિ) છે. બોટ સ્લીપ મોડમાં છે...")
+            time.sleep(3600)
+            continue
+
+        # ૨. માર્કેટ અવર્સ (૦૯:૧૫ થી ૧૫:૩૦) -> લાઈવ સ્કેનિંગ દર ૩ મિનિટે
+        if market_open <= now <= market_close:
+            monitor_live_breakouts()
+            time.sleep(180)
+
+        # ૩. માર્કેટ બંધ થયા પછી (૧૫:૩૫ વાગ્યે) -> સાંજનો ડાર્વાસ બોક્સ રિપોર્ટ
+        elif now >= eod_time and not eod_report_sent:
+            analyze_stocks_eod()
+            eod_report_sent = True
+            time.sleep(60)
+
+        # ૪. રાત્રે ૭:૦૦ વાગ્યે -> બીજા દિવસ માટે રીસેટ
+        elif now.hour >= 19:
+            triggered_today.clear()
+            eod_report_sent = False
+            time.sleep(3600)
+
+        # બાકીના સમયમાં રાહ જુઓ
+        else:
+            time.sleep(300)
